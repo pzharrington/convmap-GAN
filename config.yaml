@@ -1,0 +1,165 @@
+base: &BASE
+
+    dataname: 'raw'
+    valname: 'raw'
+    img_dim: 128
+    noise_vect_len: 64
+    specnorm: False
+    nlayers: 4
+    convkern: 5
+    convstride: 2
+    nconvfilters: [32, 64, 128, 256]
+    ndeconvfilters: [128, 64, 32, 1]
+    label_flip: 0.01
+    batchsize: 64
+    print_batch: 20
+    checkpt_batch: 150
+    cscale: 'lin'
+    datascale: 'lin'
+    learn_rate: [0.0002, 0.0002]
+    DG_update_ratio: 2
+    resume: False
+    Nepochs: 1000
+    loss: 'binary_crossentropy'
+    weight_hists: False
+    grad_hists: False
+    sigma_plot: False
+    doubleconv: False
+
+
+SN: &SN
+    <<: *BASE
+    dataname: 'crop'
+    valname: 'crop'
+    cscale: 'pwr'
+    specnorm: True
+
+
+bigSN: &bigSN
+    <<: *SN
+    dataname: 'fullcrop'
+    valname: 'fullcrop'
+    nconvfilters: [64, 128, 256, 512]
+    ndeconvfilters: [256, 128, 64, 1]
+    Nepochs: 50
+    specnorm: True
+
+bigSN_cont:
+    <<: *bigSN
+    resume: {'D':'./expts/bigSN/models/d_cosmo_best.h5', 'G':'./expts/bigSN/models/g_cosmo_best.h5'}
+
+bigSN_cont2:
+    <<: *bigSN
+    resume: {'D':'./expts/bigSN_cont/models/d_cosmo_best.h5', 'G':'./expts/bigSN_cont/models/g_cosmo_best.h5'}
+
+bigSN_cont3:
+    <<: *bigSN
+    resume: {'D':'./expts/bigSN_cont2/models/d_cosmo_best.h5', 'G':'./expts/bigSN_cont2/models/g_cosmo_best.h5'}
+
+bigSN_256:
+    <<: *bigSN
+    dataname: 'full'
+    valname: 'full'
+    Nepochs: 100
+    img_dim: 256
+    label_flip: 0.05
+
+bigSN_noBN:
+    <<: *bigSN
+    Nepochs: 100
+    sigma_plot: True
+
+bigSN_TTUR: &bigSN_TTUR
+    <<: *bigSN
+    Nepochs: 50
+    sigma_plot: True
+    learn_rate: [0.0002, 0.0004]
+
+bigSN_TTUR_cont:
+    <<: *bigSN_TTUR
+    resume: {'D':'./expts/bigSN_TTUR/models/d_cosmo_best.h5', 'G':'./expts/bigSN_TTUR/models/g_cosmo_best.h5'}
+    Nepochs: 70
+    sigma_plot: False
+
+dbigSN:
+    <<: *bigSN
+    doubleconv: True
+
+bignoSN: &bignoSN
+    <<: *bigSN
+    specnorm: False
+    label_flip: 0.05
+
+bignoSN_256: &bignoSN_256
+    <<: *bignoSN
+    Nepochs: 100
+    dataname: 'full'
+    valname: 'full'
+    img_dim: 256
+    label_flip: 0.01
+
+bignoSN2:
+    <<: *bignoSN
+    label_flip: 0.02
+    grad_hists: True
+
+bigSNhinge: &bigSNhinge
+    <<: *bigSN
+    loss: 'hinge'
+    label_flip: 0.05
+
+testSN:
+    <<: *SN
+
+testSN_monitor:
+    <<: *SN
+
+testSN2:
+    <<: *SN
+    weight_hists: True
+    grad_hists: True
+
+testSN_noBN:
+    <<: *SN
+
+
+noSN: &noSN
+    <<: *BASE
+    dataname: 'crop'
+    valname: 'crop'
+    cscale: 'pwr'
+    specnorm: False
+
+LossTest:
+    <<: *noSN
+    specnorm: True
+
+SN_noflip:
+    <<: *SN
+    label_flip: 0.0
+
+SN_TTUR_2:
+    <<: *SN
+    learn_rate: [0.0002, 0.0004]
+
+SN_TTUR_4:
+    <<: *SN
+    learn_rate: [0.0001, 0.0004]
+
+noSN_repeat:
+    <<: *noSN
+
+noSN_4DG:
+    <<: *noSN
+    DG_update_ratio: 4
+
+SN_4DG:
+    <<: *SN
+    DG_update_ratio: 4
+
+SN_continue:
+    <<: *SN
+    resume: {'D':'./expts/SN/models/d_cosmo0999.h5', 'G':'./expts/SN/models/g_cosmo0999.h5'}
+
+
+
