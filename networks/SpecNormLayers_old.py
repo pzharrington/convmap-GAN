@@ -60,7 +60,7 @@ class DenseSN(Dense):
         self.sigma=K.dot(_v, W_reshaped)
         self.sigma=K.dot(self.sigma, K.transpose(_u))
         #normalize it
-        W_bar = W_reshaped / self.sigma
+        W_bar = W_reshaped #/ self.sigma
         #reshape weight tensor
         if training in {0, False}:
             W_bar = K.reshape(W_bar, W_shape)
@@ -185,7 +185,7 @@ class _ConvSN(Layer):
             self.sigma=K.dot(_v, W_reshaped)
             self.sigma=K.dot(self.sigma, K.transpose(_u))
             #normalize it
-            W_bar = W_reshaped / self.sigma
+            W_bar = W_reshaped #/ self.sigma
             #reshape weight tensor
             if training in {0, False}:
                 W_bar = K.reshape(W_bar, W_shape)
@@ -337,7 +337,7 @@ class ConvSN2D(Conv2D):
         self.sigma=K.dot(_v, W_reshaped)
         self.sigma=K.dot(self.sigma, K.transpose(_u))
         #normalize it
-        W_bar = W_reshaped / self.sigma
+        W_bar = W_reshaped #/ self.sigma
         #reshape weight tensor
         if training in {0, False}:
             W_bar = K.reshape(W_bar, W_shape)
@@ -452,7 +452,7 @@ class ConvSN2DTranspose(Conv2DTranspose):
         self.sigma=K.dot(_v, W_reshaped)
         self.sigma=K.dot(self.sigma, K.transpose(_u))
         #normalize it
-        W_bar = W_reshaped / self.sigma
+        W_bar = W_reshaped #/ self.sigma
         #reshape weight tensor
         if training in {0, False}:
             W_bar = K.reshape(W_bar, W_shape)

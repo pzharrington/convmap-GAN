@@ -46,7 +46,7 @@ def save_img_grid(generator, noise_vector_length, fname=None, Xterm=True, scale=
     for i in range(imgs_per_side):
         for j in range(imgs_per_side):
             gridimg[i*genimg_sidelen:(i+1)*genimg_sidelen, j*genimg_sidelen:(j+1)*genimg_sidelen] \
-                = samples[cnt,0,:,:]
+                = np.squeeze(samples[cnt,:,:,:])
             cnt += 1
     plt.figure(figsize=(5,4))
     if scale == 'pwr':
@@ -75,7 +75,7 @@ def save_realimg_grid(reals, Xterm=True, scale="lin"):
     for i in range(imgs_per_side):
         for j in range(imgs_per_side):
             gridimg[i*smpimg_sidelen:(i+1)*smpimg_sidelen, j*smpimg_sidelen:(j+1)*smpimg_sidelen] \
-                = samples[cnt,0,:,:]
+                = np.squeeze(samples[cnt,:,:,:])
             cnt += 1
     plt.figure(figsize=(5,4))
     if scale == 'pwr':

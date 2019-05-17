@@ -15,14 +15,14 @@ import logging_utils
 from parameters import load_params
 import plots
 import tboard
-from SpecNormLayers import ConvSN2D, ConvSN2DTranspose, DenseSN
+from SpecNormLayers_old import ConvSN2D, ConvSN2DTranspose, DenseSN
 
 
 _SNlayertypes = [type(ConvSN2D(filters=2, kernel_size=2)), type(ConvSN2DTranspose(5, 5)), type(DenseSN(1))]
 
 
 
-class DCGAN:
+class JCGAN:
     
     def __init__(self, configtag, expDir):
 
@@ -47,13 +47,39 @@ class DCGAN:
         loss_fns = self._get_loss()
         self.discrim.compile(loss=loss_fns['D'], optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), metrics=['accuracy'])
 
-        # Stack generator and discriminator networks together and compile
+        # Set up generator to use Jacobian clamping
+        self.lam_max = 20.
+        self.lam_min = 1.
+        self.eps = 1.
+
         z = Input(shape=(1,self.noise_vect_len))
-        genimg = self.genrtor(z)
+        eps = Input(shape=(1,self.noise_vect_len))
+        G_z = self.genrtor(z)
+        zp = keras.layers.add([z, eps])
+        G_zp = self.genrtor(zp)
+        logging.info('zp: '+str(zp.shape))
+        dG = tf.norm(tf.squeeze(G_z - G_zp, axis=[-1]), axis=(1,2)) # NHWC format
+        logging.info('dG: '+str(dG.shape))
+        dz = tf.norm(tf.squeeze(eps, axis=[1]), axis=-1)
+        logging.info('dz: '+str(dz.shape))
+        Q = Lambda(lambda inputs: inputs[0] / inputs[1])([dG, dz])
+        logging.info('Q: '+str(Q.shape))
+        l_max = K.constant(self.lam_max, name='lam_max')
+        l_min = K.constant(self.lam_min, name='lam_min')
+        logging.info('lmin, lmax : '+str(l_min.shape) + ', '+str(l_max.shape))
+        l_max_diff = keras.layers.maximum([Q - l_max, tf.zeros_like(Q)])
+        l_min_diff = keras.layers.minimum([Q - l_min, tf.zeros_like(Q)])
+        logging.info('lmin_diff, lmax_diff: '+str(l_min_diff.shape)+', '+str(l_max_diff.shape))
+        Lmax = K.pow(l_max_diff, 2.)
+        Lmin = K.pow(l_min_diff, 2.)
+        L = keras.layers.Add()([Lmax, Lmin])
+        logging.info('Lmax, Lmin, L: '+str(Lmax.shape)+', '+str(Lmin.shape)+', '+str(L.shape))
+        
         self.discrim.trainable = False
-        decision = self.discrim(genimg)
-        self.stacked = Model(z, decision)
-        self.stacked.compile(loss=loss_fns['G'], optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
+        decision = self.discrim(G_zp)
+        self.stacked = Model(inputs=[z, eps], outputs=[decision])
+        self.stacked.summary()
+        self.stacked.compile(loss=loss_fns['G'](JC_loss=L), optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
 
         # Setup tensorboard stuff
         self.TB_genimg = tboard.TboardImg('genimg')
@@ -83,15 +109,15 @@ class DCGAN:
         
         Ldict = {}
         if self.loss == 'binary_crossentropy':
-            def my_crossentropy(y_true, y_pred):
-                return K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
-            def paper_crossentropy(y_true, y_pred):
-                x_Pr = y_true*K.log(y_pred)
-                one = K.ones_like(y_true)
-                x_Pg = (one - y_true)*K.log(1 - y_pred)
-                return -K.mean(x_Pr + x_Pg, axis= -1)
-            Ldict['D'] = keras.losses.binary_crossentropy #paper_crossentropy #my_crossentropy #keras.losses.binary_crossentropy
-            Ldict['G'] = keras.losses.binary_crossentropy #paper_crossentropy #my_crossentropy #keras.losses.binary_crossentropy
+            def crossentropy_JC(JC_loss):
+                def loss_func(y_true, y_pred):
+                    loss =  K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=False), axis=-1)
+                    loss += JC_loss
+                    return loss 
+                return loss_func
+
+            Ldict['D'] = keras.losses.binary_crossentropy
+            Ldict['G'] = crossentropy_JC
         elif self.loss == 'hinge':
             def Ghinge(ytrue, ypred):
                 return -K.mean(ypred, axis=-1)
@@ -100,6 +126,7 @@ class DCGAN:
         return Ldict
 
     def build_discriminator(self):
+
         
         dmodel = Sequential()
         for lyrIdx in range(self.nlayers):
@@ -254,6 +281,7 @@ class DCGAN:
             # generate fakes
             real_img_batch = self.real_imgs[shuffler[batch*self.batchsize:(batch+1)*self.batchsize]]
             noise_vects = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))
+            eps = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))*self.eps
             fake_img_batch = self.genrtor.predict(noise_vects)
 
             reals = self.real*np.ones((self.batchsize,1))
@@ -283,7 +311,7 @@ class DCGAN:
                 d_fake_losses.append(discr_fake_loss[0]) 
 
             # train generator via stacked model
-            genrtr_loss = self.stacked.train_on_batch(noise_vects, self.real*np.ones((self.batchsize,1)))
+            genrtr_loss = self.stacked.train_on_batch([noise_vects, eps], self.real*np.ones((self.batchsize,1)))
             t2 = time.time()
 
             g_losses.append(genrtr_loss)

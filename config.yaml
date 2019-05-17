@@ -25,7 +25,7 @@ base: &BASE
     grad_hists: False
     sigma_plot: False
     doubleconv: False
-
+    datafmt: 'channels_first'
 
 SN: &SN
     <<: *BASE
@@ -41,8 +41,13 @@ bigSN: &bigSN
     valname: 'fullcrop'
     nconvfilters: [64, 128, 256, 512]
     ndeconvfilters: [256, 128, 64, 1]
-    Nepochs: 50
+    Nepochs: 70
     specnorm: True
+    sigma_plot: True
+    datafmt: 'channels_last'
+
+bigJC:
+    <<: *bigSN
 
 bigSN_cont:
     <<: *bigSN
@@ -71,8 +76,6 @@ bigSN_noBN:
 
 bigSN_TTUR: &bigSN_TTUR
     <<: *bigSN
-    Nepochs: 50
-    sigma_plot: True
     learn_rate: [0.0002, 0.0004]
 
 bigSN_TTUR_cont:
@@ -88,7 +91,7 @@ dbigSN:
 bignoSN: &bignoSN
     <<: *bigSN
     specnorm: False
-    label_flip: 0.05
+    label_flip: 0.01
 
 bignoSN_256: &bignoSN_256
     <<: *bignoSN
