@@ -25,7 +25,7 @@ base: &BASE
     grad_hists: False
     sigma_plot: False
     doubleconv: False
-    datafmt: 'channels_first'
+    datafmt: 'channels_last'
 
 SN: &SN
     <<: *BASE
@@ -43,31 +43,21 @@ bigSN: &bigSN
     ndeconvfilters: [256, 128, 64, 1]
     Nepochs: 70
     specnorm: True
-    sigma_plot: True
     datafmt: 'channels_last'
 
 bigJC:
     <<: *bigSN
 
-bigSN_cont:
-    <<: *bigSN
-    resume: {'D':'./expts/bigSN/models/d_cosmo_best.h5', 'G':'./expts/bigSN/models/g_cosmo_best.h5'}
-
-bigSN_cont2:
-    <<: *bigSN
-    resume: {'D':'./expts/bigSN_cont/models/d_cosmo_best.h5', 'G':'./expts/bigSN_cont/models/g_cosmo_best.h5'}
-
-bigSN_cont3:
-    <<: *bigSN
-    resume: {'D':'./expts/bigSN_cont2/models/d_cosmo_best.h5', 'G':'./expts/bigSN_cont2/models/g_cosmo_best.h5'}
-
-bigSN_256:
+bigSN_256: &bigSN_256
     <<: *bigSN
     dataname: 'full'
     valname: 'full'
-    Nepochs: 100
+    Nepochs: 70
     img_dim: 256
-    label_flip: 0.05
+
+bigJC_256:
+    <<: *bigSN_256
+    specnorm: False
 
 bigSN_noBN:
     <<: *bigSN
@@ -84,85 +74,29 @@ bigSN_TTUR_cont:
     Nepochs: 70
     sigma_plot: False
 
-dbigSN:
-    <<: *bigSN
-    doubleconv: True
 
 bignoSN: &bignoSN
     <<: *bigSN
     specnorm: False
-    label_flip: 0.01
 
 bignoSN_256: &bignoSN_256
     <<: *bignoSN
-    Nepochs: 100
+    Nepochs: 70
     dataname: 'full'
     valname: 'full'
     img_dim: 256
     label_flip: 0.01
-
-bignoSN2:
-    <<: *bignoSN
-    label_flip: 0.02
-    grad_hists: True
 
 bigSNhinge: &bigSNhinge
     <<: *bigSN
     loss: 'hinge'
     label_flip: 0.05
 
-testSN:
-    <<: *SN
-
-testSN_monitor:
-    <<: *SN
-
-testSN2:
-    <<: *SN
-    weight_hists: True
-    grad_hists: True
-
-testSN_noBN:
-    <<: *SN
-
-
-noSN: &noSN
-    <<: *BASE
-    dataname: 'crop'
-    valname: 'crop'
-    cscale: 'pwr'
-    specnorm: False
-
-LossTest:
-    <<: *noSN
-    specnorm: True
-
-SN_noflip:
-    <<: *SN
+bigWGP_256: 
+    <<: *bignoSN_256
     label_flip: 0.0
-
-SN_TTUR_2:
-    <<: *SN
-    learn_rate: [0.0002, 0.0004]
-
-SN_TTUR_4:
-    <<: *SN
-    learn_rate: [0.0001, 0.0004]
-
-noSN_repeat:
-    <<: *noSN
-
-noSN_4DG:
-    <<: *noSN
-    DG_update_ratio: 4
-
-SN_4DG:
-    <<: *SN
-    DG_update_ratio: 4
-
-SN_continue:
-    <<: *SN
-    resume: {'D':'./expts/SN/models/d_cosmo0999.h5', 'G':'./expts/SN/models/g_cosmo0999.h5'}
+    DG_update_ratio: 10
+    batchsize: 32
 
 
 

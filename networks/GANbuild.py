@@ -5,7 +5,9 @@ from keras.layers import *
 from keras.activations import relu
 from keras.models import Model, Sequential
 from keras.models import load_model
-import keras.backend as K
+import keras.backend as Ki
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nn
 import time
 import sys
 sys.path.append('./utils')
@@ -31,6 +33,9 @@ class DCGAN:
         logging.info('Parameters:')
         self.init_params(configtag)
         self.expDir = expDir
+        self.inits = {'dense':keras.initializers.RandomNormal(mean=0.0, stddev=0.02),
+                      'conv':keras.initializers.TruncatedNormal(mean=0.0, stddev=0.02),
+                      'tconv':keras.initializers.RandomNormal(mean=0.0, stddev=0.02)}
 
         # Import slices
         self.real_imgs = np.load('./data/'+self.dataname+'_train.npy')
@@ -43,9 +48,15 @@ class DCGAN:
         # Build networks
         self.discrim, self.genrtor = self.load_networks()
 
-	# Compile discriminator so it can be trained separately
+        # Compile discriminator so it can be trained separately
         loss_fns = self._get_loss()
-        self.discrim.compile(loss=loss_fns['D'], optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), metrics=['accuracy'])
+        def mean_prob(y_true, y_pred):
+            # metric to measure mean probability of D predictions (0=fake, 1=real)
+            return K.mean(K.sigmoid(y_pred))
+        
+        self.discrim.compile(loss=loss_fns['D'], 
+                             optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), 
+                             metrics=[mean_prob])
 
         # Stack generator and discriminator networks together and compile
         z = Input(shape=(1,self.noise_vect_len))
@@ -85,14 +96,10 @@ class DCGAN:
         if self.loss == 'binary_crossentropy':
             def my_crossentropy(y_true, y_pred):
                 return K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
-            def paper_crossentropy(y_true, y_pred):
-                x_Pr = y_true*K.log(y_pred)
-                one = K.ones_like(y_true)
-                x_Pg = (one - y_true)*K.log(1 - y_pred)
-                return -K.mean(x_Pr + x_Pg, axis= -1)
-            Ldict['D'] = keras.losses.binary_crossentropy #paper_crossentropy #my_crossentropy #keras.losses.binary_crossentropy
-            Ldict['G'] = keras.losses.binary_crossentropy #paper_crossentropy #my_crossentropy #keras.losses.binary_crossentropy
-        elif self.loss == 'hinge':
+            
+            Ldict['D'] = my_crossentropy
+            Ldict['G'] = my_crossentropy
+        elif self.loss == 'hinge': # hinge loss is untested
             def Ghinge(ytrue, ypred):
                 return -K.mean(ypred, axis=-1)
             Ldict['D'] = keras.losses.hinge
@@ -110,11 +117,11 @@ class DCGAN:
             dmodel.add(LeakyReLU(alpha=self.alpha))
         dmodel.add(Flatten(data_format=self.datafmt))
         dmodel.add(self._dense_layer_type(1, shape_spec=False))
-        if self.loss == 'hinge':
+        if self.loss == 'hinge': # hinge loss is untested
             act = 'tanh'
         else:
             act = 'sigmoid'
-        dmodel.add(Activation(act))
+        #dmodel.add(Activation(act)) # remove sigmoid activation to avoid bug w/ default Keras loss
         dmodel.summary(print_fn=logging_utils.print_func)
         img = Input(shape=self.imshape)
         return Model(img, dmodel(img))
@@ -150,14 +157,16 @@ class DCGAN:
         lyr = None
         if shape_spec:
             if self.specnorm:
-                lyr = DenseSN(num, input_shape=shape_spec)
+                # Use DenseSN if you want spectral normalization in G
+                lyr = Dense(num, input_shape=shape_spec, kernel_initializer=self.inits['dense'])
             else:
-                lyr = Dense(num, input_shape=shape_spec)
+                lyr = Dense(num, input_shape=shape_spec, kernel_initializer=self.inits['dense'])
         else:
             if self.specnorm:
-                lyr = DenseSN(num)
+                # Use DenseSN if you want spectral normalization in D
+                lyr = DenseSN(num, kernel_initializer=self.inits['dense'])
             else:
-                lyr = Dense(num)
+                lyr = Dense(num, kernel_initializer=self.inits['dense'])
         return lyr
 
 
@@ -166,18 +175,22 @@ class DCGAN:
         lyr = None
         if lyrIdx == 0:
             if self.specnorm:
+                # Use ConvSN2D if you want spectral normalization in D
                 lyr = ConvSN2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride, 
-                               padding='same', input_shape=self.imshape, data_format=self.datafmt)
+                             padding='same', input_shape=self.imshape, data_format=self.datafmt, 
+                             kernel_initializer=self.inits['conv'])
             else:
                 lyr = Conv2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride, 
-                             padding='same', input_shape=self.imshape, data_format=self.datafmt)
+                             padding='same', input_shape=self.imshape, data_format=self.datafmt,
+                             kernel_initializer=self.inits['conv'])
         else:
             if self.specnorm:
+                # Use ConvSN2D if you want spectral normalization in D
                 lyr = ConvSN2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride,
-                               padding='same', data_format=self.datafmt)
+                             padding='same', data_format=self.datafmt, kernel_initializer=self.inits['conv'])
             else:
                 lyr = Conv2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride,
-                             padding='same', data_format=self.datafmt)
+                             padding='same', data_format=self.datafmt, kernel_initializer=self.inits['conv'])
         return lyr
 
 
@@ -186,11 +199,12 @@ class DCGAN:
 
         lyr = None
         if self.specnorm:
-            lyr = ConvSN2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
-                                    padding='same', data_format=self.datafmt)
+            # Use ConvSN2DTranspose if you want spectral normalization in G
+            lyr = Conv2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
+                                    padding='same', data_format=self.datafmt, kernel_initializer=self.inits['tconv'])
         else:
             lyr = Conv2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
-                                  padding='same', data_format=self.datafmt)
+                                  padding='same', data_format=self.datafmt, kernel_initializer=self.inits['tconv'])
         return lyr
 
 
@@ -235,7 +249,7 @@ class DCGAN:
             self.bn_axis = 1
             self.imshape = (1, self.img_dim, self.img_dim)
         self.real = 1
-        if self.loss == 'hinge':
+        if self.loss == 'hinge': # hinge loss is untested
             self.fake = -1
         else:
             self.fake = 0
@@ -258,8 +272,7 @@ class DCGAN:
 
             reals = self.real*np.ones((self.batchsize,1))
             fakes = self.fake*np.ones((self.batchsize,1))
-            # anneal label flipping to 1% over 30000 iterations
-            labelflip = self.label_flip  #max(0.01, self.label_flip*(1. - iternum/30000.))
+            labelflip = self.label_flip
             for i in range(reals.shape[0]):
                 if np.random.uniform(low=0., high=1.0) < labelflip:
                     reals[i,0] = self.fake
@@ -267,18 +280,10 @@ class DCGAN:
 
             # train discriminator
             for iters in range(self.DG_update_ratio//2):
-                ''' 
-                perm = np.random.permutation(2*self.batchsize)
-                imgs = np.concatenate((real_img_batch, fake_img_batch))
-                labels = np.concatenate((reals, fakes))
-                shuff_ims = imgs[perm,:,:,:]
-                shuff_labels = labels[perm,:]
-                '''
                 discr_real_loss = self.discrim.train_on_batch(real_img_batch, reals)
                 discr_fake_loss = self.discrim.train_on_batch(fake_img_batch, fakes)
-                discr_loss = [0.5*(discr_real_loss[0]+discr_fake_loss[0]),
-                              0.5*(discr_real_loss[1]+discr_fake_loss[1])] # self.discrim.train_on_batch(shuff_ims, shuff_labels)
-                d_losses.append(discr_loss[0])
+                discr_loss = 0.5*(discr_real_loss[0]+discr_fake_loss[0])
+                d_losses.append(discr_loss)
                 d_real_losses.append(discr_real_loss[0])
                 d_fake_losses.append(discr_fake_loss[0]) 
 
@@ -288,19 +293,17 @@ class DCGAN:
 
             g_losses.append(genrtr_loss)
 
-
-            #logging.info('Drl %f, Dfl %f, Gl %f'%(discr_real_loss[0], discr_fake_loss[0], genrtr_loss))
-
             
             t2 = time.time()
 
             if batch%self.print_batch == 0:
                 logging.info("| --- batch %d of %d --- |"%(batch + 1, num_batches))
-                logging.info("|Discr real acc=%f, fake acc=%f"%(discr_real_loss[1], discr_fake_loss[1]))
-                logging.info("|Discriminator: loss=%f, accuracy = %f"%(discr_loss[0], discr_loss[1]))
+                logging.info("|Discr real pred=%f, fake pred=%f"%(discr_real_loss[1], discr_fake_loss[1]))
+                logging.info("|Discriminator: loss=%f"%(discr_loss))
                 logging.info("|Generator: loss=%f"%(genrtr_loss))
                 logging.info("|Time: %f"%(t2-t1))
             if iternum%self.checkpt_batch == 0:
+                # Tensorboard monitoring
                 iternum = iternum/self.checkpt_batch
                 self.TB_genimg.on_epoch_end(iternum, self, logs={})
                 chisq = self.TB_pixhist.on_epoch_end(iternum, self, logs={})
@@ -311,7 +314,7 @@ class DCGAN:
                 sess = K.get_session()
                 
                 if self.weight_hists:
-                    # Get kernels for conv and FC layers
+                    # Monitor histogram of weights for conv and dense layers
                     Dlayerdict = {layer.name:layer.get_weights()[0] for layer in self.discrim.layers[1].layers \
                                                                     if 'conv' in layer.name or 'dense' in layer.name}
                     Glayerdict = {layer.name:layer.get_weights()[0] for layer in self.genrtor.layers[1].layers \
@@ -321,6 +324,7 @@ class DCGAN:
                     self.TB_Gwts.on_epoch_end(self, iternum, Glayerdict)
 
                 if self.grad_hists:
+                    # Monitor histogram of gradients -- VERY slow and crashes when using big network
                     ggrad_tensors = self._get_grad_tensors(self.stacked, tf.ones((self.batchsize, 1)), \
                                                            tf.random.normal((self.batchsize, 1, self.noise_vect_len)), stacked=True)
                     ggrads = sess.run(ggrad_tensors)
@@ -340,18 +344,17 @@ class DCGAN:
                     self.TB_Dsigmas.on_epoch_end(self, iternum, dsiglog)
                     self.TB_Gsigmas.on_epoch_end(self, iternum, gsiglog)
                 
-                    
-
                 d_losses = []
                 d_real_losses = []
                 d_fake_losses = []
                 g_losses = []
                 
                 if chisq<self.bestchi and iternum>50:
+                    # update best chi-square score and save
                     self.bestchi = chisq
                     self.genrtor.save(self.expDir+'models/g_cosmo_best.h5')
                     self.discrim.save(self.expDir+'models/d_cosmo_best.h5')
-                    logging.info("BEST saved at %d"%iternum)
+                    logging.info("BEST saved at %d, chi=%f"%(iternum, chi))
 
 
     def _get_grad_tensors(self, model, labels, data, stacked=False):

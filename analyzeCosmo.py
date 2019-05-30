@@ -21,12 +21,12 @@ from SpecNormLayers import DenseSN, ConvSN2D, ConvSN2DTranspose
 def my_crossentropy(y_true, y_pred):
     return K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
 
-# custom_layers = None
+custom_layers = None
 custom_layers = {'DenseSN':DenseSN, 'ConvSN2D':ConvSN2D, 'ConvSN2DTranspose':ConvSN2DTranspose, 
                  'my_crossentropy':my_crossentropy}
 
 # Import slices
-real_imgs = np.load('./data/fullcrop_val.npy')
+real_imgs = np.load('./data/full_val.npy')
 n_imgs = real_imgs.shape[0]
 noise_vect_len = 64
 print(real_imgs.shape)
@@ -35,20 +35,22 @@ print(real_imgs.shape)
 #K.set_learning_phase(1)
 
 # Load weights
-genrtor = load_model('./expts/bigSN-run7/models/g_cosmo_best.h5', custom_objects=custom_layers)
-discrim = load_model('./expts/bigSN-run7/models/d_cosmo_best.h5', custom_objects=custom_layers)
+genrtor = load_model('./expts/bigSN_256/run2/models/g_cosmo_best.h5', custom_objects=custom_layers)
+discrim = load_model('./expts/bigSN_256/run2/models/d_cosmo_best.h5', custom_objects=custom_layers)
 discrim.summary()
 genrtor.summary()
 lossfn = 'binary_crossentropy'
 
-discrim.compile(loss=lossfn, optimizer=keras.optimizers.Adam(lr=0.0002, beta_1=0.5), metrics=['accuracy'])
 
-z = Input(shape=(1,noise_vect_len))
-genimg = genrtor(z)
-discrim.trainable = False
-decision = discrim(genimg)
-stacked = Model(z, decision)
-stacked.compile(loss=lossfn, optimizer=keras.optimizers.Adam(lr=0.0002, beta_1=0.5))
+
+#discrim.compile(loss=lossfn, optimizer=keras.optimizers.Adam(lr=0.0002, beta_1=0.5), metrics=['accuracy'])
+
+#z = Input(shape=(1,noise_vect_len))
+#genimg = genrtor(z)
+#discrim.trainable = False
+#decision = discrim(genimg)
+#stacked = Model(z, decision)
+#stacked.compile(loss=lossfn, optimizer=keras.optimizers.Adam(lr=0.0002, beta_1=0.5))
 
 
 
@@ -63,8 +65,13 @@ fakes = genrtor.predict(noise_vects1)
 plots.save_img_grid(genrtor, noise_vect_len, 0, Xterm=True, scale='pwr')
 plots.save_img_grid(genrtor, noise_vect_len, 0, Xterm=True, scale='pwr')
 #wdw = [-1.1, 1.1, 1e-4, 3e4]
-plots.pix_intensity_hist(real_imgs, genrtor, noise_vect_len, 'lin', Xterm=True)
+chi = plots.pix_intensity_hist(real_imgs, genrtor, noise_vect_len, 'lin', Xterm=True)
 plt.show()
+print('Chi=%f'%chi)
+
+#noise_vects1 = np.random.normal(loc=0.0, size=(127000, 1, noise_vect_len))
+#fakes = genrtor.predict(noise_vects1)
+#np.save('./data/gen/fullcrop.npy', fakes)
 
 '''
 print(discrim.predict(reals))

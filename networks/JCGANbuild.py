@@ -43,9 +43,13 @@ class JCGAN:
         # Build networks
         self.discrim, self.genrtor = self.load_networks()
 
-	# Compile discriminator so it can be trained separately
+        # Compile discriminator so it can be trained separately
         loss_fns = self._get_loss()
-        self.discrim.compile(loss=loss_fns['D'], optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), metrics=['accuracy'])
+        def mean_prob(y_true, y_pred):
+            # metric to measure mean probability of D predictions (0=fake, 1=real)
+            return K.mean(K.sigmoid(y_pred))
+
+        self.discrim.compile(loss=loss_fns['D'], optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), metrics=[mean_prob])
 
         # Set up generator to use Jacobian clamping
         self.lam_max = 20.
@@ -76,7 +80,7 @@ class JCGAN:
         logging.info('Lmax, Lmin, L: '+str(Lmax.shape)+', '+str(Lmin.shape)+', '+str(L.shape))
         
         self.discrim.trainable = False
-        decision = self.discrim(G_zp)
+        decision = self.discrim(G_z)
         self.stacked = Model(inputs=[z, eps], outputs=[decision])
         self.stacked.summary()
         self.stacked.compile(loss=loss_fns['G'](JC_loss=L), optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
@@ -111,14 +115,18 @@ class JCGAN:
         if self.loss == 'binary_crossentropy':
             def crossentropy_JC(JC_loss):
                 def loss_func(y_true, y_pred):
-                    loss =  K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=False), axis=-1)
+                    loss =  K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
+                    logging.info(loss.shape)
                     loss += JC_loss
+                    logging.info(loss.shape)
                     return loss 
                 return loss_func
+            def my_crossentropy(y_true, y_pred):
+                return K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
 
-            Ldict['D'] = keras.losses.binary_crossentropy
+            Ldict['D'] = my_crossentropy
             Ldict['G'] = crossentropy_JC
-        elif self.loss == 'hinge':
+        elif self.loss == 'hinge': # hinge loss is untested
             def Ghinge(ytrue, ypred):
                 return -K.mean(ypred, axis=-1)
             Ldict['D'] = keras.losses.hinge
@@ -126,7 +134,6 @@ class JCGAN:
         return Ldict
 
     def build_discriminator(self):
-
         
         dmodel = Sequential()
         for lyrIdx in range(self.nlayers):
@@ -141,7 +148,7 @@ class JCGAN:
             act = 'tanh'
         else:
             act = 'sigmoid'
-        dmodel.add(Activation(act))
+        #dmodel.add(Activation(act)) # no sigmoid activation if using logits directly 
         dmodel.summary(print_fn=logging_utils.print_func)
         img = Input(shape=self.imshape)
         return Model(img, dmodel(img))
@@ -262,7 +269,7 @@ class JCGAN:
             self.bn_axis = 1
             self.imshape = (1, self.img_dim, self.img_dim)
         self.real = 1
-        if self.loss == 'hinge':
+        if self.loss == 'hinge': # hinge loss is untested
             self.fake = -1
         else:
             self.fake = 0
@@ -286,29 +293,20 @@ class JCGAN:
 
             reals = self.real*np.ones((self.batchsize,1))
             fakes = self.fake*np.ones((self.batchsize,1))
-            # anneal label flipping to 1% over 30000 iterations
-            labelflip = self.label_flip  #max(0.01, self.label_flip*(1. - iternum/30000.))
+            labelflip = self.label_flip
             for i in range(reals.shape[0]):
                 if np.random.uniform(low=0., high=1.0) < labelflip:
                     reals[i,0] = self.fake
                     fakes[i,0] = self.real
-
+            
             # train discriminator
             for iters in range(self.DG_update_ratio//2):
-                ''' 
-                perm = np.random.permutation(2*self.batchsize)
-                imgs = np.concatenate((real_img_batch, fake_img_batch))
-                labels = np.concatenate((reals, fakes))
-                shuff_ims = imgs[perm,:,:,:]
-                shuff_labels = labels[perm,:]
-                '''
                 discr_real_loss = self.discrim.train_on_batch(real_img_batch, reals)
                 discr_fake_loss = self.discrim.train_on_batch(fake_img_batch, fakes)
-                discr_loss = [0.5*(discr_real_loss[0]+discr_fake_loss[0]),
-                              0.5*(discr_real_loss[1]+discr_fake_loss[1])] # self.discrim.train_on_batch(shuff_ims, shuff_labels)
-                d_losses.append(discr_loss[0])
+                discr_loss = 0.5*(discr_real_loss[0]+discr_fake_loss[0])
+                d_losses.append(discr_loss)
                 d_real_losses.append(discr_real_loss[0])
-                d_fake_losses.append(discr_fake_loss[0]) 
+                d_fake_losses.append(discr_fake_loss[0])
 
             # train generator via stacked model
             genrtr_loss = self.stacked.train_on_batch([noise_vects, eps], self.real*np.ones((self.batchsize,1)))
@@ -316,19 +314,14 @@ class JCGAN:
 
             g_losses.append(genrtr_loss)
 
-
-            #logging.info('Drl %f, Dfl %f, Gl %f'%(discr_real_loss[0], discr_fake_loss[0], genrtr_loss))
-
-            
-            t2 = time.time()
-
             if batch%self.print_batch == 0:
                 logging.info("| --- batch %d of %d --- |"%(batch + 1, num_batches))
-                logging.info("|Discr real acc=%f, fake acc=%f"%(discr_real_loss[1], discr_fake_loss[1]))
-                logging.info("|Discriminator: loss=%f, accuracy = %f"%(discr_loss[0], discr_loss[1]))
+                logging.info("|Discr real prob=%f, fake prob=%f"%(discr_real_loss[1], discr_fake_loss[1]))
+                logging.info("|Discriminator: loss=%f"%(discr_loss)
                 logging.info("|Generator: loss=%f"%(genrtr_loss))
                 logging.info("|Time: %f"%(t2-t1))
             if iternum%self.checkpt_batch == 0:
+                # Tensorboard monitoring
                 iternum = iternum/self.checkpt_batch
                 self.TB_genimg.on_epoch_end(iternum, self, logs={})
                 chisq = self.TB_pixhist.on_epoch_end(iternum, self, logs={})
@@ -339,7 +332,7 @@ class JCGAN:
                 sess = K.get_session()
                 
                 if self.weight_hists:
-                    # Get kernels for conv and FC layers
+                    # Monitor histrograms of weights for conv and dense layers
                     Dlayerdict = {layer.name:layer.get_weights()[0] for layer in self.discrim.layers[1].layers \
                                                                     if 'conv' in layer.name or 'dense' in layer.name}
                     Glayerdict = {layer.name:layer.get_weights()[0] for layer in self.genrtor.layers[1].layers \
@@ -349,6 +342,7 @@ class JCGAN:
                     self.TB_Gwts.on_epoch_end(self, iternum, Glayerdict)
 
                 if self.grad_hists:
+                    # Monitor histograms of gradients -- VERY slow and crashes for big networks
                     ggrad_tensors = self._get_grad_tensors(self.stacked, tf.ones((self.batchsize, 1)), \
                                                            tf.random.normal((self.batchsize, 1, self.noise_vect_len)), stacked=True)
                     ggrads = sess.run(ggrad_tensors)
@@ -368,14 +362,13 @@ class JCGAN:
                     self.TB_Dsigmas.on_epoch_end(self, iternum, dsiglog)
                     self.TB_Gsigmas.on_epoch_end(self, iternum, gsiglog)
                 
-                    
-
                 d_losses = []
                 d_real_losses = []
                 d_fake_losses = []
                 g_losses = []
                 
                 if chisq<self.bestchi and iternum>50:
+                    # Update best chi-square score and save checkpoint
                     self.bestchi = chisq
                     self.genrtor.save(self.expDir+'models/g_cosmo_best.h5')
                     self.discrim.save(self.expDir+'models/d_cosmo_best.h5')
