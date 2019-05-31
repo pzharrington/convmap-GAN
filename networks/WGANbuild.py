@@ -2,10 +2,13 @@ import numpy as np
 import tensorflow as tf
 import keras
 from keras.layers import *
+from keras.layers.merge import _Merge
 from keras.activations import relu
 from keras.models import Model, Sequential
 from keras.models import load_model
-import keras.backend as K
+import keras.backend as Ki
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nn
 import time
 import sys
 sys.path.append('./utils')
@@ -15,14 +18,20 @@ import logging_utils
 from parameters import load_params
 import plots
 import tboard
-from SpecNormLayers_old import ConvSN2D, ConvSN2DTranspose, DenseSN
-
+from SpecNormLayers import ConvSN2D, ConvSN2DTranspose, DenseSN
+from functools import partial
 
 _SNlayertypes = [type(ConvSN2D(filters=2, kernel_size=2)), type(ConvSN2DTranspose(5, 5)), type(DenseSN(1))]
 
 
+class RandomWeightedAverage(_Merge):
+    """Provides a (random) weighted average between real and generated image samples"""
+    def _merge_function(self, inputs):
+        alpha = K.random_uniform((32, 1, 1, 1))
+        return (alpha * inputs[0]) + ((1 - alpha) * inputs[1])
 
-class JCGAN:
+
+class WGAN_GP:
     
     def __init__(self, configtag, expDir):
 
@@ -31,6 +40,9 @@ class JCGAN:
         logging.info('Parameters:')
         self.init_params(configtag)
         self.expDir = expDir
+        self.inits = {'dense':keras.initializers.RandomNormal(mean=0.0, stddev=0.02),
+                      'conv':keras.initializers.TruncatedNormal(mean=0.0, stddev=0.02),
+                      'tconv':keras.initializers.RandomNormal(mean=0.0, stddev=0.02)}
 
         # Import slices
         self.real_imgs = np.load('./data/'+self.dataname+'_train.npy')
@@ -43,47 +55,32 @@ class JCGAN:
         # Build networks
         self.discrim, self.genrtor = self.load_networks()
 
-        # Compile discriminator so it can be trained separately
-        loss_fns = self._get_loss()
-        def mean_prob(y_true, y_pred):
-            # metric to measure mean probability of D predictions (0=fake, 1=real)
-            return K.mean(K.sigmoid(y_pred))
+        # Build critic
+        self.genrtor.trainable = False
+        real_img = Input(shape=self.imshape)
+        z_disc = Input(shape=(1,self.noise_vect_len))
+        fake_img = self.genrtor(z_disc)
+        interp_img = RandomWeightedAverage()([real_img, fake_img])
 
-        self.discrim.compile(loss=loss_fns['D'], optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5), metrics=[mean_prob])
+        fake = self.discrim(fake_img)
+        real = self.discrim(real_img)
+        interp = self.discrim(interp_img)
 
-        # Set up generator to use Jacobian clamping
-        self.lam_max = 15.
-        self.lam_min = 5.
-        self.eps = 1.
+        partial_gp_loss = partial(self.gradient_penalty_loss, averaged_samples=interp_img)
+        partial_gp_loss.__name__ = 'gradient_penalty'
+        self.critic = Model(inputs=[real_img, z_disc], outputs=[real, fake, interp])
+        self.critic.compile(loss=[self.mean_loss, self.mean_loss, partial_gp_loss],
+                            optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5),
+                            loss_weights=[1,1,10])
 
-        z = Input(shape=(1,self.noise_vect_len))
-        eps = Input(shape=(1,self.noise_vect_len))
-        G_z = self.genrtor(z)
-        zp = keras.layers.add([z, eps])
-        G_zp = self.genrtor(zp)
-        logging.info('zp: '+str(zp.shape))
-        dG = tf.norm(tf.squeeze(G_z - G_zp, axis=[-1]), axis=(1,2)) # NHWC format
-        logging.info('dG: '+str(dG.shape))
-        dz = tf.norm(tf.squeeze(eps, axis=[1]), axis=-1)
-        logging.info('dz: '+str(dz.shape))
-        Q = Lambda(lambda inputs: inputs[0] / inputs[1])([dG, dz])
-        logging.info('Q: '+str(Q.shape))
-        l_max = K.constant(self.lam_max, name='lam_max')
-        l_min = K.constant(self.lam_min, name='lam_min')
-        logging.info('lmin, lmax : '+str(l_min.shape) + ', '+str(l_max.shape))
-        l_max_diff = keras.layers.maximum([Q - l_max, tf.zeros_like(Q)])
-        l_min_diff = keras.layers.minimum([Q - l_min, tf.zeros_like(Q)])
-        logging.info('lmin_diff, lmax_diff: '+str(l_min_diff.shape)+', '+str(l_max_diff.shape))
-        Lmax = K.pow(l_max_diff, 2.)
-        Lmin = K.pow(l_min_diff, 2.)
-        L = keras.layers.Add()([Lmax, Lmin])
-        logging.info('Lmax, Lmin, L: '+str(Lmax.shape)+', '+str(Lmin.shape)+', '+str(L.shape))
-        
+        # Build generator
         self.discrim.trainable = False
-        decision = self.discrim(G_z)
-        self.stacked = Model(inputs=[z, eps], outputs=[decision])
-        self.stacked.summary()
-        self.stacked.compile(loss=loss_fns['G'](JC_loss=L), optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
+        self.genrtor.trainable = True
+        z = Input(shape=(1,self.noise_vect_len))
+        genimg = self.genrtor(z)
+        decision = self.discrim(genimg)
+        self.stacked = Model(z, decision)
+        self.stacked.compile(loss=self.mean_loss, optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
 
         # Setup tensorboard stuff
         self.TB_genimg = tboard.TboardImg('genimg')
@@ -109,29 +106,25 @@ class JCGAN:
             return ( self.build_discriminator(), self.build_generator() )
 
 
-    def _get_loss(self):
-        
-        Ldict = {}
-        if self.loss == 'binary_crossentropy':
-            def crossentropy_JC(JC_loss):
-                def loss_func(y_true, y_pred):
-                    loss =  K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
-                    logging.info(loss.shape)
-                    loss += JC_loss
-                    logging.info(loss.shape)
-                    return loss 
-                return loss_func
-            def my_crossentropy(y_true, y_pred):
-                return K.mean(K.binary_crossentropy(y_true, y_pred, from_logits=True), axis=-1)
+    def mean_loss(self, y_true, y_pred):
+        return K.mean(y_true * y_pred)
 
-            Ldict['D'] = my_crossentropy
-            Ldict['G'] = crossentropy_JC
-        elif self.loss == 'hinge': # hinge loss is untested
-            def Ghinge(ytrue, ypred):
-                return -K.mean(ypred, axis=-1)
-            Ldict['D'] = keras.losses.hinge
-            Ldict['G'] = Ghinge
-        return Ldict
+    def gradient_penalty_loss(self, y_true, y_pred, averaged_samples):
+        """
+        Computes gradient penalty based on prediction and weighted real / fake samples
+        """
+        gradients = K.gradients(y_pred, averaged_samples)[0]
+        # compute the euclidean norm by squaring ...
+        gradients_sqr = K.square(gradients)
+        #   ... summing over the rows ...
+        gradients_sqr_sum = K.sum(gradients_sqr,
+                                  axis=np.arange(1, len(gradients_sqr.shape)))
+        #   ... and sqrt
+        gradient_l2_norm = K.sqrt(gradients_sqr_sum)
+        # compute lambda * (1 - ||grad||)^2 still for each single sample
+        gradient_penalty = K.square(1 - gradient_l2_norm)
+        # return the mean as loss over all the batch samples
+        return K.mean(gradient_penalty)
 
     def build_discriminator(self):
         
@@ -140,15 +133,15 @@ class JCGAN:
             if self.doubleconv:
                 dmodel.add(self._conv_layer_type(1, lyrIdx))
             dmodel.add(self._conv_layer_type(self.convstride, lyrIdx)) 
-            dmodel.add(BatchNormalization(epsilon=1e-5, momentum=0.9, axis=self.bn_axis))
+            #dmodel.add(BatchNormalization(epsilon=1e-5, momentum=0.9, axis=self.bn_axis))
             dmodel.add(LeakyReLU(alpha=self.alpha))
         dmodel.add(Flatten(data_format=self.datafmt))
         dmodel.add(self._dense_layer_type(1, shape_spec=False))
-        if self.loss == 'hinge':
+        if self.loss == 'hinge': # hinge loss is untested
             act = 'tanh'
         else:
             act = 'sigmoid'
-        #dmodel.add(Activation(act)) # no sigmoid activation if using logits directly 
+        #dmodel.add(Activation(act)) # remove sigmoid activation to avoid bug w/ default Keras loss
         dmodel.summary(print_fn=logging_utils.print_func)
         img = Input(shape=self.imshape)
         return Model(img, dmodel(img))
@@ -184,14 +177,16 @@ class JCGAN:
         lyr = None
         if shape_spec:
             if self.specnorm:
-                lyr = DenseSN(num, input_shape=shape_spec)
+                # Use DenseSN if you want spectral normalization in G
+                lyr = Dense(num, input_shape=shape_spec, kernel_initializer=self.inits['dense'])
             else:
-                lyr = Dense(num, input_shape=shape_spec)
+                lyr = Dense(num, input_shape=shape_spec, kernel_initializer=self.inits['dense'])
         else:
             if self.specnorm:
-                lyr = DenseSN(num)
+                # Use DenseSN if you want spectral normalization in D
+                lyr = DenseSN(num, kernel_initializer=self.inits['dense'])
             else:
-                lyr = Dense(num)
+                lyr = Dense(num, kernel_initializer=self.inits['dense'])
         return lyr
 
 
@@ -200,18 +195,22 @@ class JCGAN:
         lyr = None
         if lyrIdx == 0:
             if self.specnorm:
+                # Use ConvSN2D if you want spectral normalization in D
                 lyr = ConvSN2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride, 
-                               padding='same', input_shape=self.imshape, data_format=self.datafmt)
+                             padding='same', input_shape=self.imshape, data_format=self.datafmt, 
+                             kernel_initializer=self.inits['conv'])
             else:
                 lyr = Conv2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride, 
-                             padding='same', input_shape=self.imshape, data_format=self.datafmt)
+                             padding='same', input_shape=self.imshape, data_format=self.datafmt,
+                             kernel_initializer=self.inits['conv'])
         else:
             if self.specnorm:
+                # Use ConvSN2D if you want spectral normalization in D
                 lyr = ConvSN2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride,
-                               padding='same', data_format=self.datafmt)
+                             padding='same', data_format=self.datafmt, kernel_initializer=self.inits['conv'])
             else:
                 lyr = Conv2D(filters=self.nconvfilters[lyrIdx], kernel_size=self.convkern, strides=stride,
-                             padding='same', data_format=self.datafmt)
+                             padding='same', data_format=self.datafmt, kernel_initializer=self.inits['conv'])
         return lyr
 
 
@@ -220,11 +219,12 @@ class JCGAN:
 
         lyr = None
         if self.specnorm:
-            lyr = ConvSN2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
-                                    padding='same', data_format=self.datafmt)
+            # Use ConvSN2DTranspose if you want spectral normalization in G
+            lyr = Conv2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
+                                    padding='same', data_format=self.datafmt, kernel_initializer=self.inits['tconv'])
         else:
             lyr = Conv2DTranspose(self.ndeconvfilters[lyrIdx], self.convkern, strides=stride,
-                                  padding='same', data_format=self.datafmt)
+                                  padding='same', data_format=self.datafmt, kernel_initializer=self.inits['tconv'])
         return lyr
 
 
@@ -268,11 +268,8 @@ class JCGAN:
         else:
             self.bn_axis = 1
             self.imshape = (1, self.img_dim, self.img_dim)
-        self.real = 1
-        if self.loss == 'hinge': # hinge loss is untested
-            self.fake = -1
-        else:
-            self.fake = 0
+        self.real = -1
+        self.fake = 1
 
     def train_epoch(self, shuffler, num_batches, epochIdx):
         
@@ -285,38 +282,38 @@ class JCGAN:
             iternum = (epochIdx*num_batches + batch)
             t1 = time.time()
 
-            # generate fakes
-            real_img_batch = self.real_imgs[shuffler[batch*self.batchsize:(batch+1)*self.batchsize]]
-            noise_vects = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))
-            eps = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))*self.eps
-            fake_img_batch = self.genrtor.predict(noise_vects)
-
             reals = self.real*np.ones((self.batchsize,1))
             fakes = self.fake*np.ones((self.batchsize,1))
+            dontcare = np.ones((self.batchsize,1)) # dummy labels for gradient penalty loss
             labelflip = self.label_flip
             for i in range(reals.shape[0]):
                 if np.random.uniform(low=0., high=1.0) < labelflip:
                     reals[i,0] = self.fake
                     fakes[i,0] = self.real
-            
-            # train discriminator
+
+            # train critic
             for iters in range(self.DG_update_ratio//2):
-                discr_real_loss = self.discrim.train_on_batch(real_img_batch, reals)
-                discr_fake_loss = self.discrim.train_on_batch(fake_img_batch, fakes)
-                discr_loss = 0.5*(discr_real_loss[0]+discr_fake_loss[0])
+                start_idx = batch*self.batchsize*(self.DG_update_ratio//2) + iters*self.batchsize
+                end_idx = start_idx + self.batchsize
+                real_img_batch = self.real_imgs[shuffler[start_idx:end_idx]]
+                noise_vects = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))
+
+                discr_all_losses = self.critic.train_on_batch([real_img_batch, noise_vects],
+                                                             [reals, fakes, dontcare])
+                discr_loss = discr_all_losses[0]
                 d_losses.append(discr_loss)
-                d_real_losses.append(discr_real_loss[0])
-                d_fake_losses.append(discr_fake_loss[0])
 
             # train generator via stacked model
-            genrtr_loss = self.stacked.train_on_batch([noise_vects, eps], self.real*np.ones((self.batchsize,1)))
+            genrtr_loss = self.stacked.train_on_batch(noise_vects, self.real*np.ones((self.batchsize,1)))
             t2 = time.time()
 
             g_losses.append(genrtr_loss)
 
+            
+            t2 = time.time()
+
             if batch%self.print_batch == 0:
                 logging.info("| --- batch %d of %d --- |"%(batch + 1, num_batches))
-                logging.info("|Discr real prob=%f, fake prob=%f"%(discr_real_loss[1], discr_fake_loss[1]))
                 logging.info("|Discriminator: loss=%f"%(discr_loss))
                 logging.info("|Generator: loss=%f"%(genrtr_loss))
                 logging.info("|Time: %f"%(t2-t1))
@@ -332,7 +329,7 @@ class JCGAN:
                 sess = K.get_session()
                 
                 if self.weight_hists:
-                    # Monitor histrograms of weights for conv and dense layers
+                    # Monitor histogram of weights for conv and dense layers
                     Dlayerdict = {layer.name:layer.get_weights()[0] for layer in self.discrim.layers[1].layers \
                                                                     if 'conv' in layer.name or 'dense' in layer.name}
                     Glayerdict = {layer.name:layer.get_weights()[0] for layer in self.genrtor.layers[1].layers \
@@ -342,7 +339,7 @@ class JCGAN:
                     self.TB_Gwts.on_epoch_end(self, iternum, Glayerdict)
 
                 if self.grad_hists:
-                    # Monitor histograms of gradients -- VERY slow and crashes for big networks
+                    # Monitor histogram of gradients -- VERY slow and crashes when using big network
                     ggrad_tensors = self._get_grad_tensors(self.stacked, tf.ones((self.batchsize, 1)), \
                                                            tf.random.normal((self.batchsize, 1, self.noise_vect_len)), stacked=True)
                     ggrads = sess.run(ggrad_tensors)
@@ -368,11 +365,11 @@ class JCGAN:
                 g_losses = []
                 
                 if chisq<self.bestchi and iternum>50:
-                    # Update best chi-square score and save checkpoint
+                    # update best chi-square score and save
                     self.bestchi = chisq
                     self.genrtor.save(self.expDir+'models/g_cosmo_best.h5')
                     self.discrim.save(self.expDir+'models/d_cosmo_best.h5')
-                    logging.info("BEST saved at %d"%iternum)
+                    logging.info("BEST saved at %d, chi=%f"%(iternum, chi))
 
 
     def _get_grad_tensors(self, model, labels, data, stacked=False):

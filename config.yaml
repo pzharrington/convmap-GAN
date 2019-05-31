@@ -92,6 +92,12 @@ bigSNhinge: &bigSNhinge
     loss: 'hinge'
     label_flip: 0.05
 
+bigWGP:
+    <<: *bignoSN
+    label_flip: 0.0
+    DG_update_ratio: 10
+
+
 bigWGP_256: 
     <<: *bignoSN_256
     label_flip: 0.0
