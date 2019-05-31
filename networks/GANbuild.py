@@ -354,7 +354,7 @@ class DCGAN:
                     self.bestchi = chisq
                     self.genrtor.save(self.expDir+'models/g_cosmo_best.h5')
                     self.discrim.save(self.expDir+'models/d_cosmo_best.h5')
-                    logging.info("BEST saved at %d, chi=%f"%(iternum, chi))
+                    logging.info("BEST saved at %d, chi=%f"%(iternum, chisq))
 
 
     def _get_grad_tensors(self, model, labels, data, stacked=False):
