@@ -2,6 +2,6 @@
 
 cd /home/pharrington/convmap_dcgan
 source activate gpuTF113
-export CUDA_VISIBLE_DEVICES=1
-python ./WGPtrain.py bigWGP 1
+export CUDA_VISIBLE_DEVICES=0
+python ./WGPtrain.py bigWGP_256 3
 

@@ -19,6 +19,7 @@ from parameters import load_params
 import plots
 import tboard
 from SpecNormLayers import ConvSN2D, ConvSN2DTranspose, DenseSN
+from LayerNorm import LayerNormalization
 from functools import partial
 
 _SNlayertypes = [type(ConvSN2D(filters=2, kernel_size=2)), type(ConvSN2DTranspose(5, 5)), type(DenseSN(1))]
@@ -56,6 +57,7 @@ class WGAN_GP:
         self.discrim, self.genrtor = self.load_networks()
 
         # Build critic
+        
         self.genrtor.trainable = False
         real_img = Input(shape=self.imshape)
         z_disc = Input(shape=(1,self.noise_vect_len))
@@ -70,8 +72,15 @@ class WGAN_GP:
         partial_gp_loss.__name__ = 'gradient_penalty'
         self.critic = Model(inputs=[real_img, z_disc], outputs=[real, fake, interp])
         self.critic.compile(loss=[self.mean_loss, self.mean_loss, partial_gp_loss],
-                            optimizer=keras.optimizers.Adam(lr=self.D_lr, beta_1=0.5),
+                            optimizer=keras.optimizers.RMSprop(lr=self.D_lr),
                             loss_weights=[1,1,10])
+        '''
+        self.genrtor.trainable = False
+        real_img = Input(shape=self.imshape)
+        real = self.discrim(real_img)
+        self.critic = Model(inputs=[real_img], outputs=[real])
+        self.critic.compile(loss=self.mean_loss, optimizer=keras.optimizers.RMSprop(lr=self.D_lr), metrics=['accuracy'])
+        '''
 
         # Build generator
         self.discrim.trainable = False
@@ -80,7 +89,7 @@ class WGAN_GP:
         genimg = self.genrtor(z)
         decision = self.discrim(genimg)
         self.stacked = Model(z, decision)
-        self.stacked.compile(loss=self.mean_loss, optimizer=keras.optimizers.Adam(lr=self.G_lr, beta_1=0.5))
+        self.stacked.compile(loss=self.mean_loss, optimizer=keras.optimizers.RMSprop(lr=self.G_lr))
 
         # Setup tensorboard stuff
         self.TB_genimg = tboard.TboardImg('genimg')
@@ -133,15 +142,11 @@ class WGAN_GP:
             if self.doubleconv:
                 dmodel.add(self._conv_layer_type(1, lyrIdx))
             dmodel.add(self._conv_layer_type(self.convstride, lyrIdx)) 
+            dmodel.add(LayerNormalization(epsilon=1e-5))
             #dmodel.add(BatchNormalization(epsilon=1e-5, momentum=0.9, axis=self.bn_axis))
             dmodel.add(LeakyReLU(alpha=self.alpha))
         dmodel.add(Flatten(data_format=self.datafmt))
         dmodel.add(self._dense_layer_type(1, shape_spec=False))
-        if self.loss == 'hinge': # hinge loss is untested
-            act = 'tanh'
-        else:
-            act = 'sigmoid'
-        #dmodel.add(Activation(act)) # remove sigmoid activation to avoid bug w/ default Keras loss
         dmodel.summary(print_fn=logging_utils.print_func)
         img = Input(shape=self.imshape)
         return Model(img, dmodel(img))
@@ -297,11 +302,20 @@ class WGAN_GP:
                 end_idx = start_idx + self.batchsize
                 real_img_batch = self.real_imgs[shuffler[start_idx:end_idx]]
                 noise_vects = np.random.normal(loc=0.0, size=(self.batchsize, 1, self.noise_vect_len))
-
+                
                 discr_all_losses = self.critic.train_on_batch([real_img_batch, noise_vects],
                                                              [reals, fakes, dontcare])
                 discr_loss = discr_all_losses[0]
                 d_losses.append(discr_loss)
+                '''
+                fake_img_batch = self.genrtor.predict(noise_vects)
+                discr_real_loss = self.critic.train_on_batch(real_img_batch, reals)
+                discr_fake_loss = self.critic.train_on_batch(fake_img_batch, fakes)
+                discr_loss = 0.5*(discr_real_loss[0]+discr_fake_loss[0])
+                d_losses.append(discr_loss)
+                d_real_losses.append(discr_real_loss[0])
+                d_fake_losses.append(discr_fake_loss[0])
+                '''
 
             # train generator via stacked model
             genrtr_loss = self.stacked.train_on_batch(noise_vects, self.real*np.ones((self.batchsize,1)))

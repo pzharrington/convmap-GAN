@@ -103,6 +103,6 @@ bigWGP_256:
     label_flip: 0.0
     DG_update_ratio: 10
     batchsize: 32
-
+    learn_rate: [0.00005, 0.00005]
 
 
